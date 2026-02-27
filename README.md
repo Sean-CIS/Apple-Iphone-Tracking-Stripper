@@ -18,7 +18,7 @@ iStrip connects to your iPhone over USB and strips tracking, analytics, telemetr
 | **App Tracking Data Cleanup** | Deletes tracking caches, analytics databases, and attribution files from app sandboxes |
 | **Safari Stripping** | Clears cookies, cache, localStorage, and injects anti-tracking protections via CDP |
 | **Photo GPS Stripping** | Removes GPS/location EXIF metadata from all photos on device |
-| **IP & MAC Address Rotation** | Forces hourly Wi-Fi MAC rotation via Private Address, enables iCloud Private Relay for IP masking, and can apply rotation to all saved networks via backup |
+| **IP & MAC Address Rotation** | Enables Private Address (MAC randomization) per-network via WiFi profile installation, or on ALL saved networks via backup modification. Toggles Wi-Fi for new IP address via DHCP. Installs privacy restrictions to limit ad tracking. |
 | **Deep Backup-Based Hardening** | Backs up device, modifies TCC permissions, Safari settings, ad tracking prefs, location tracking, diagnostics sharing, and Siri data collection, then restores |
 | **Live Network Audit** | Captures real-time device traffic and identifies connections to known tracker domains |
 | **Syslog Monitor** | Watches device logs for analytics, location pings, ad SDK activity, and telemetry |
@@ -74,7 +74,7 @@ This opens an interactive menu where you can:
 2. **Scan only** (detect tracking without removing)
 3. **Network audit** (capture live traffic, identify trackers)
 4. **Syslog monitor** (watch device logs for tracking)
-5. **Address rotation** (force IP & MAC address changes hourly)
+5. **Address rotation** (force IP & MAC address changes)
 6. **Individual operations** (pick specific things to run)
 
 ### Automatic Mode

@@ -347,6 +347,60 @@ class BackupEngine:
                 log.error("Failed to delete cookies: %s", exc)
         return False
 
+    def enable_private_wifi_addresses(self) -> bool:
+        """
+        Enable Private Wi-Fi Address on all saved networks in the backup.
+
+        Modifies the WiFi plist to set Private Address flags on every
+        saved network, giving each a unique randomized MAC address.
+        """
+        from istrip.modules.address_rotation import AddressRotator, _generate_random_mac
+
+        wifi_path = self._find_backup_file(
+            "SystemPreferencesDomain", "SystemConfiguration/com.apple.wifi.plist"
+        )
+        if not wifi_path:
+            log.warning("WiFi plist not found in backup for Private Address setup.")
+            return False
+
+        try:
+            with open(wifi_path, "rb") as f:
+                wifi_prefs = plistlib.load(f)
+
+            networks_modified = 0
+            known = wifi_prefs.get("List of known networks", [])
+            if isinstance(known, list):
+                for network in known:
+                    if not isinstance(network, dict):
+                        continue
+                    ssid = network.get("SSID_STR", "")
+                    new_mac = _generate_random_mac()
+
+                    # iOS 18+ keys
+                    network["PrivateMACAddressModeUserSetting"] = 2
+                    network["CachedPrivateMACAddress"] = new_mac
+
+                    # Legacy keys (iOS 14-17)
+                    network["__PrivateMACAddress"] = new_mac
+                    network["__PrivateMACAddressEnabled"] = True
+
+                    networks_modified += 1
+                    log.debug("Set private address for SSID: %s → %s", ssid, new_mac)
+
+            if networks_modified > 0:
+                with open(wifi_path, "wb") as f:
+                    plistlib.dump(wifi_prefs, f)
+
+            log.info("Enabled Private Wi-Fi Address on %d networks.", networks_modified)
+            self.modifications.append(
+                f"MAC Rotation: Private Address enabled on {networks_modified} "
+                f"saved Wi-Fi networks with unique randomized MACs"
+            )
+            return networks_modified > 0
+        except Exception as exc:
+            log.error("Failed to modify WiFi plist for Private Address: %s", exc)
+            return False
+
     def run_full_strip(self, progress_callback=None) -> list[str]:
         """
         Execute all stripping operations on the current backup.
@@ -361,6 +415,7 @@ class BackupEngine:
             ("Stripping location tracking", self.strip_location_tracking),
             ("Disabling Spotlight/Siri data collection", self.strip_spotlight_siri),
             ("Deleting cookie stores", self.delete_cookies),
+            ("Enabling Private Wi-Fi Address (MAC rotation) on all networks", self.enable_private_wifi_addresses),
         ]
 
         for desc, func in steps:

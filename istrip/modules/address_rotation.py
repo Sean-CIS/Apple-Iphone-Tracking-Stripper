@@ -1,20 +1,26 @@
 """
 Address rotation module — force IP address and MAC address changes
-to prevent persistent device tracking on iPhone 17 Pro Max and other iOS devices.
+to prevent persistent device tracking on iOS devices.
 
-Uses verified pymobiledevice3 APIs:
+Uses verified pymobiledevice3 APIs (v7.x):
 - MobileConfigService.set_wifi_power_state() — toggle Wi-Fi off/on to force
-  new DHCP lease (new IP) and MAC re-randomization
+  new DHCP lease (new IP address)
+- MobileConfigService.install_wifi_profile() — install per-network WiFi
+  profiles with DisableAssociationMACRandomization=False to ensure Private
+  Address (MAC randomization) is enabled
 - MobileConfigService.install_profile() — install restriction profiles with
   real Apple payload keys (forceLimitAdTracking, allowApplePersonalizedAdvertising)
 - DiagnosticsService.restart() — full device restart as a fallback
 - DiagnosticsService.get_wifi() — read Wi-Fi interface state
+- FileRelayService.request_sources(["WiFi"]) — read WiFi configuration
 - Mobilebackup2Service — backup/restore to modify Wi-Fi plist for Private Address
 """
 
+import io
 import logging
 import plistlib
 import random
+import tarfile
 import time
 import uuid
 
@@ -61,14 +67,30 @@ class AddressRotator:
     """
     Forces IP address and MAC address rotation on iOS devices.
 
-    Works through four mechanisms:
-    1. Wi-Fi toggle — cycles Wi-Fi off/on via MobileConfigService to get
-       a new DHCP lease (new IP) and trigger MAC re-randomization
-    2. Restriction profile — installs a real Apple restrictions profile
-       that forces ad tracking limits
-    3. Backup modification — modifies the Wi-Fi plist to enable Private
-       Address on all saved networks
-    4. Device restart — full restart via DiagnosticsService as a last resort
+    MAC address rotation works through these mechanisms (in order of reliability):
+
+    1. WiFi profile installation — installs a WiFi configuration profile for a
+       specific network with DisableAssociationMACRandomization=False, ensuring
+       iOS uses a randomized (Private) MAC address for that network. This is the
+       MOST RELIABLE method and uses a real pymobiledevice3 API:
+       MobileConfigService.install_wifi_profile()
+
+    2. Backup modification — modifies the Wi-Fi plist in a device backup to
+       enable Private Address on ALL saved networks at once, then restores.
+       This is the DEEPEST method (affects all networks) but requires a full
+       backup/restore cycle.
+
+    3. Wi-Fi toggle — cycles Wi-Fi off/on via MobileConfigService. This forces
+       a new DHCP lease (new IP address). It does NOT directly change the MAC,
+       but if Private Address is already enabled, reconnecting may use the
+       existing private MAC. Use this for IP rotation.
+
+    4. Device restart — full restart via DiagnosticsService as a last resort.
+       Resets all network state.
+
+    IP address rotation:
+    - Wi-Fi toggle forces a new DHCP lease → new IP address.
+    - This is reliable and fast.
 
     All methods use verified pymobiledevice3 APIs (v7.x).
     """
@@ -79,8 +101,7 @@ class AddressRotator:
     def get_current_addresses(self) -> dict:
         """Read current network addresses from the device via lockdownd."""
         try:
-            # LockdownClient.get_value() with no args returns all device values
-            all_vals = self.lockdown.get_value() or {}
+            all_vals = self.lockdown.all_values or {}
             return {
                 "wifi_mac": all_vals.get("WiFiAddress", "Unknown"),
                 "bluetooth_mac": all_vals.get("BluetoothAddress", "Unknown"),
@@ -102,11 +123,58 @@ class AddressRotator:
             log.error("Failed to read Wi-Fi info: %s", exc)
             return {}
 
+    def read_wifi_config(self) -> dict:
+        """
+        Read WiFi configuration from the device via FileRelayService.
+
+        Uses FileRelayService.request_sources(["WiFi"]) to pull WiFi
+        configuration files from the device as a tarball. This lets us
+        inspect the current Private Address settings without a full backup.
+
+        Returns dict with parsed WiFi plist data, or empty dict on failure.
+        """
+        try:
+            from pymobiledevice3.services.file_relay import FileRelayService
+            relay = FileRelayService(self.lockdown)
+            data = relay.request_sources(["WiFi"])
+
+            if not data:
+                log.warning("FileRelayService returned no data for WiFi source.")
+                return {}
+
+            # data is a tarball; extract and parse plist files
+            result = {}
+            tar_buf = io.BytesIO(data)
+            try:
+                with tarfile.open(fileobj=tar_buf, mode="r:*") as tar:
+                    for member in tar.getmembers():
+                        if member.name.endswith(".plist") and member.isfile():
+                            f = tar.extractfile(member)
+                            if f:
+                                try:
+                                    plist_data = plistlib.load(f)
+                                    result[member.name] = plist_data
+                                except Exception:
+                                    pass
+            except Exception as exc:
+                log.warning("Failed to parse WiFi tarball: %s", exc)
+
+            return result
+
+        except Exception as exc:
+            log.warning("FileRelayService not available: %s", exc)
+            return {}
+
     def toggle_wifi(self, pause: float = 3.0) -> bool:
         """
-        Toggle Wi-Fi off then on to force:
-        - New DHCP lease → new IP address
-        - Wi-Fi re-association → triggers Private Address MAC rotation
+        Toggle Wi-Fi off then on to force a new DHCP lease (new IP address).
+
+        IMPORTANT: This changes the IP address ONLY. It does NOT change the
+        MAC address. If Private Address is already enabled for the current
+        network, the device will reconnect using the same private MAC.
+
+        To change the MAC address, use install_wifi_profile_with_private_mac()
+        or the backup-based enable_private_wifi_address() method.
 
         Uses MobileConfigService.set_wifi_power_state() which is a real
         lockdownd API that directly controls the Wi-Fi power state.
@@ -126,24 +194,74 @@ class AddressRotator:
             config.set_wifi_power_state(True)
 
             config.close()
-            log.info("Wi-Fi toggled — device will get new IP and rotate MAC.")
+            log.info("Wi-Fi toggled — device will get a new IP address (new DHCP lease).")
             return True
         except Exception as exc:
             log.error("Failed to toggle Wi-Fi: %s", exc)
+            return False
+
+    def install_wifi_profile_with_private_mac(
+        self,
+        ssid: str,
+        password: str = "",
+        encryption_type: str = "WPA2",
+    ) -> bool:
+        """
+        Install a WiFi configuration profile for a specific network with
+        MAC randomization ENABLED (DisableAssociationMACRandomization=False).
+
+        This is the MOST RELIABLE way to ensure Private Address (randomized MAC)
+        is active for a given WiFi network. It uses the real pymobiledevice3 API:
+        MobileConfigService.install_wifi_profile()
+
+        When this profile is installed, iOS will use a randomized MAC address
+        whenever connecting to this SSID. The MAC will be different from the
+        device's real hardware MAC.
+
+        Args:
+            ssid: The WiFi network name (SSID).
+            password: The WiFi password (empty for open networks).
+            encryption_type: "WPA2", "WPA", "WEP", or "None".
+        """
+        try:
+            config = MobileConfigService(self.lockdown)
+
+            config.install_wifi_profile(
+                encryption_type=encryption_type,
+                ssid=ssid,
+                password=password,
+                auto_join=True,
+                disable_association_mac_randomization=False,  # Enable MAC randomization
+            )
+
+            config.close()
+            log.info(
+                "WiFi profile installed for '%s' with Private Address (MAC randomization) enabled.",
+                ssid,
+            )
+            return True
+        except Exception as exc:
+            log.error("Failed to install WiFi profile for '%s': %s", ssid, exc)
             return False
 
     def enable_private_wifi_address(self, backup_engine) -> bool:
         """
         Enable Private Wi-Fi Address for ALL saved networks in a device backup.
 
-        Modifies the WiFi plist in the backup. iOS stores known networks
-        under "List of known networks" (list of dicts, each with SSID_STR
-        and other keys). We set the __PrivateAddress key and related flags.
+        Modifies the WiFi plist in the backup. iOS stores known networks in
+        the plist at SystemPreferencesDomain/SystemConfiguration/com.apple.wifi.plist
+        under the "List of known networks" key (array of dicts).
 
-        The exact plist key names come from iOS backup forensics:
-        - "List of known networks" — array of network dicts (iOS 14+)
-        - "__PrivateAddress" — the per-network randomized MAC
-        - "__PrivateMACAddressEnabled" — boolean to enable Private Address
+        For each saved network, we set:
+        - PrivateMACAddressModeUserSetting = 2 (enabled, iOS 18+ key)
+        - CachedPrivateMACAddress = <new random MAC> (iOS 18+ key)
+
+        We also try the legacy format keys for older iOS:
+        - __PrivateMACAddress = <new random MAC>
+        - __PrivateMACAddressEnabled = True
+
+        After restoring this backup, the device will use randomized MAC
+        addresses for all saved WiFi networks.
 
         Args:
             backup_engine: An active BackupEngine with a completed backup.
@@ -168,11 +286,18 @@ class AddressRotator:
                     if not isinstance(network, dict):
                         continue
                     ssid = network.get("SSID_STR", "")
-                    # Set a fresh private MAC for this network
-                    network["__PrivateAddress"] = _generate_random_mac()
+                    new_mac = _generate_random_mac()
+
+                    # iOS 18+ keys (verified from forensic analysis)
+                    network["PrivateMACAddressModeUserSetting"] = 2  # 2 = enabled
+                    network["CachedPrivateMACAddress"] = new_mac
+
+                    # Legacy keys (iOS 14-17)
+                    network["__PrivateMACAddress"] = new_mac
                     network["__PrivateMACAddressEnabled"] = True
+
                     networks_modified += 1
-                    log.debug("Set private address for SSID: %s", ssid)
+                    log.debug("Set private address for SSID: %s → %s", ssid, new_mac)
 
             if networks_modified > 0:
                 with open(wifi_path, "wb") as f:
@@ -181,7 +306,7 @@ class AddressRotator:
             log.info("Enabled Private Wi-Fi Address on %d networks.", networks_modified)
             backup_engine.modifications.append(
                 f"MAC Rotation: Private Address enabled on {networks_modified} "
-                f"saved Wi-Fi networks"
+                f"saved Wi-Fi networks with new randomized MACs"
             )
             return networks_modified > 0
 
@@ -193,16 +318,14 @@ class AddressRotator:
         """
         Enable 'Limit IP Address Tracking' in device preferences via backup.
 
-        Modifies Safari and Mail preferences to enable IP hiding features.
-        These are standard iOS preference keys that Safari and Mail read
-        on launch.
+        Modifies Safari preferences to enable tracking prevention features.
+        These are standard iOS preference keys that Safari reads on launch.
 
         Args:
             backup_engine: An active BackupEngine with a completed backup.
         """
         modified = False
 
-        # Safari preferences — enable IP hiding and tracking prevention
         safari_path = backup_engine._find_backup_file(
             "HomeDomain", "Library/Preferences/com.apple.mobilesafari.plist"
         )
@@ -211,7 +334,6 @@ class AddressRotator:
                 with open(safari_path, "rb") as f:
                     prefs = plistlib.load(f)
 
-                # Real Safari preference keys
                 prefs["SafariSendDoNotTrackHTTPHeader"] = True
                 prefs["WebKitPreferences.crossSiteTrackingPreventionEnabled"] = True
                 prefs["BlockStoragePolicy"] = 2  # Block all third-party cookies
@@ -231,11 +353,14 @@ class AddressRotator:
 
     def force_network_reset(self, method: str = "wifi_toggle") -> bool:
         """
-        Force an address change on the device.
+        Force a network address change on the device.
 
         Args:
-            method: "wifi_toggle" (fast, toggles Wi-Fi off/on) or
-                    "restart" (full device restart, slower but more thorough).
+            method: "wifi_toggle" (fast, forces new IP via DHCP release/renew) or
+                    "restart" (full device restart, resets all network state).
+
+        Note: "wifi_toggle" only changes the IP address. To change the MAC,
+        use install_wifi_profile_with_private_mac() or backup-based methods.
         """
         if method == "wifi_toggle":
             return self.toggle_wifi()
@@ -243,7 +368,7 @@ class AddressRotator:
             try:
                 diag = DiagnosticsService(self.lockdown)
                 diag.restart()
-                log.info("Device restart initiated — addresses will rotate on reconnect.")
+                log.info("Device restart initiated — all network state will reset on reboot.")
                 return True
             except Exception as exc:
                 log.error("Failed to restart device: %s", exc)
@@ -262,7 +387,7 @@ class AddressRotator:
         - forceWiFiPowerOn: True — keeps Wi-Fi on (needed for Private Address)
 
         These are REAL Apple restriction keys verified against pymobiledevice3
-        source code (MobileConfigService.install_restrictions_profile).
+        source code (MobileConfigService).
         """
         try:
             config = MobileConfigService(self.lockdown)
@@ -274,23 +399,22 @@ class AddressRotator:
                 "PayloadContent": [{
                     "PayloadType": "com.apple.applicationaccess",
                     "PayloadVersion": 1,
-                    "PayloadIdentifier": f"com.istrip.address-rotation.restrictions",
+                    "PayloadIdentifier": "com.istrip.address-rotation.restrictions",
                     "PayloadUUID": restrict_uuid,
-                    "PayloadDisplayName": "iStrip Privacy & Address Rotation",
+                    "PayloadDisplayName": "iStrip Privacy Restrictions",
                     "PayloadDescription": (
                         "Limits ad tracking, disables personalized ads, "
-                        "and keeps Wi-Fi enabled for Private Address rotation"
+                        "and keeps Wi-Fi enabled for Private Address"
                     ),
-                    # Real Apple restriction keys (verified in pymobiledevice3 source)
                     "forceLimitAdTracking": True,
                     "allowApplePersonalizedAdvertising": False,
                     "forceWiFiPowerOn": True,
                 }],
                 "PayloadDescription": (
                     "iStrip privacy restrictions — limits ad tracking "
-                    "and enforces Wi-Fi for address rotation"
+                    "and enforces Wi-Fi for Private Address"
                 ),
-                "PayloadDisplayName": "iStrip Address Rotation",
+                "PayloadDisplayName": "iStrip Privacy Restrictions",
                 "PayloadIdentifier": "com.istrip.address-rotation",
                 "PayloadOrganization": "iStrip",
                 "PayloadRemovalDisallowed": False,
@@ -313,30 +437,21 @@ class AddressRotator:
             log.error("Failed to install privacy restrictions: %s", exc)
             return False
 
-    def install_rotation_profile(self, rotation_interval: int = 3600) -> bool:
+    def install_rotation_profile(self) -> bool:
         """
-        Set up address rotation by:
-        1. Installing a restrictions profile (real Apple keys)
-        2. Toggling Wi-Fi to force immediate IP + MAC change
+        Set up address rotation by installing a restrictions profile.
 
         The restrictions profile enforces:
         - forceLimitAdTracking: True
         - allowApplePersonalizedAdvertising: False
         - forceWiFiPowerOn: True (keeps Wi-Fi on for Private Address)
-
-        The Wi-Fi toggle forces an immediate DHCP release/renew cycle.
-
-        Args:
-            rotation_interval: Advisory interval in seconds (logged only —
-                actual rotation depends on iOS Private Address settings).
         """
         success = self.install_privacy_restrictions()
         if success:
             log.info(
-                "Rotation profile installed. "
-                "Enable Private Wi-Fi Address in Settings > Wi-Fi > (i) "
-                "for MAC rotation every %d minutes.",
-                rotation_interval // 60,
+                "Privacy restrictions profile installed. "
+                "Use install_wifi_profile_with_private_mac() for per-network "
+                "MAC randomization, or the backup method for all networks."
             )
         return success
 
@@ -349,7 +464,7 @@ class AddressRotator:
         2. Enable Private Wi-Fi Address on all saved networks (via backup)
         3. Harden Safari tracking prevention (via backup)
         4. Install privacy restriction profile (real Apple keys)
-        5. Toggle Wi-Fi to force immediate address change
+        5. Toggle Wi-Fi to force new IP address
 
         Args:
             backup_engine: Optional BackupEngine with active backup for deep mods.
@@ -370,7 +485,7 @@ class AddressRotator:
                 f"Bluetooth MAC: {addrs.get('bluetooth_mac', 'N/A')}"
             )
 
-        # Step 2: Backup-based modifications
+        # Step 2: Backup-based modifications (enables Private Address on ALL networks)
         if backup_engine and backup_engine.backup_dir:
             if progress_callback:
                 progress_callback(
@@ -378,7 +493,8 @@ class AddressRotator:
                 )
             if self.enable_private_wifi_address(backup_engine):
                 actions.append(
-                    "Private Wi-Fi Address enabled on all saved Wi-Fi networks"
+                    "Private Wi-Fi Address enabled on all saved Wi-Fi networks "
+                    "(each network gets a unique randomized MAC)"
                 )
 
             if progress_callback:
@@ -397,6 +513,12 @@ class AddressRotator:
                 "Privacy restrictions installed "
                 "(ad tracking limited, personalized ads disabled)"
             )
+
+        # Step 4: Toggle Wi-Fi for new IP
+        if progress_callback:
+            progress_callback("Toggling Wi-Fi for new IP address...")
+        if self.toggle_wifi(pause=3.0):
+            actions.append("Wi-Fi toggled — new IP address acquired via DHCP")
 
         return actions
 
