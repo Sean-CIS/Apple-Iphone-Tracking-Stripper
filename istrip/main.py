@@ -53,7 +53,9 @@ def run_full_strip(dm: DeviceManager):
     {BOLD}5.{RESET} Scan & clean app tracking data
     {BOLD}6.{RESET} Strip Safari cookies, cache & storage
     {BOLD}7.{RESET} Strip photo GPS metadata
-    {BOLD}8.{RESET} Deep backup-based privacy hardening
+    {BOLD}8.{RESET} Force IP & MAC address rotation
+         (hourly rotation + Private Relay)
+    {BOLD}9.{RESET} Deep backup-based privacy hardening
          (backup → modify settings → restore)
     """)
 
@@ -177,7 +179,22 @@ def run_full_strip(dm: DeviceManager):
         results["photos"] = f"Failed: {exc}"
         status(f"Photo stripping failed: {exc}", "error")
 
-    # Step 8: Backup-based deep strip
+    # Step 8: Address rotation
+    status("Setting up IP & MAC address rotation...", "action")
+    try:
+        from istrip.modules.address_rotation import AddressRotator
+        rotator = AddressRotator(lockdown)
+        if rotator.install_rotation_profile(rotation_interval=3600):
+            results["address_rotation"] = "Rotation profile installed (hourly MAC + IP limit)"
+            status("Address rotation profile installed (MAC rotates every 60 min).", "ok")
+        else:
+            results["address_rotation"] = "Profile installation failed"
+            status("Address rotation profile failed to install.", "error")
+    except Exception as exc:
+        results["address_rotation"] = f"Failed: {exc}"
+        status(f"Address rotation setup failed: {exc}", "error")
+
+    # Step 9: Backup-based deep strip
     status("Starting deep backup-based privacy hardening...", "action")
     status("This will: backup device → modify privacy settings → restore", "info")
     if prompt_confirm("This takes several minutes and the device will restart. Proceed?"):
@@ -346,6 +363,92 @@ def run_syslog_monitor(dm: DeviceManager):
         status(f"Syslog monitor failed: {exc}", "error")
 
 
+def run_address_rotation(dm: DeviceManager):
+    """Set up IP and MAC address rotation."""
+    header("IP & MAC ADDRESS ROTATION")
+    lockdown = dm.get_lockdown()
+
+    from istrip.modules.address_rotation import AddressRotator
+    rotator = AddressRotator(lockdown)
+
+    addrs = rotator.get_current_addresses()
+    if addrs:
+        status(f"Current Wi-Fi MAC:     {addrs.get('wifi_mac', 'N/A')}", "info")
+        status(f"Current Bluetooth MAC: {addrs.get('bluetooth_mac', 'N/A')}", "info")
+        status(f"Device:                {addrs.get('product_type', 'N/A')}", "info")
+
+    print()
+    status("Address rotation prevents persistent tracking by changing", "info")
+    status("your device's IP and MAC addresses on a schedule.", "info")
+    print()
+
+    choice = prompt_choice("Select rotation mode:", [
+        "Quick setup — install rotation profile (MAC every hour + IP limit)",
+        "Full setup — backup-based deep rotation on all saved Wi-Fi networks",
+        "Generate random MACs — for manual configuration",
+        "Force immediate rotation — restart device for new addresses",
+    ])
+
+    if choice == 0:
+        status("Installing address rotation profile...", "action")
+        if rotator.install_rotation_profile(rotation_interval=3600):
+            status("Address rotation profile installed!", "ok")
+            status("  Wi-Fi MAC will rotate every 60 minutes", "ok")
+            status("  IP address tracking is limited via Private Relay", "ok")
+            status("  Bluetooth address randomization enforced", "ok")
+        else:
+            status("Failed to install rotation profile.", "error")
+
+    elif choice == 1:
+        status("This performs a full device backup, enables address rotation", "info")
+        status("on ALL saved Wi-Fi networks, enables Private Relay, and restores.", "info")
+        status("Your device will restart after restore.", "warn")
+        if prompt_confirm("Proceed with full rotation setup?"):
+            try:
+                from istrip.modules.backup_engine import BackupEngine
+                engine = BackupEngine(lockdown)
+
+                status("Creating device backup...", "action")
+                if engine.create_backup(progress_callback=lambda m: status(m, "info")):
+                    status("Backup complete. Applying rotation settings...", "action")
+                    actions = rotator.run_full_rotation_setup(
+                        backup_engine=engine,
+                        progress_callback=lambda m: status(m, "action"),
+                    )
+                    for action in actions:
+                        status(f"  {action}", "ok")
+
+                    if prompt_confirm("Restore modified backup to device?"):
+                        status("Restoring backup...", "action")
+                        engine.restore_backup(
+                            progress_callback=lambda m: status(m, "info")
+                        )
+                        status("Restore complete. Device may restart.", "ok")
+                    engine.cleanup()
+                else:
+                    status("Backup failed.", "error")
+            except Exception as exc:
+                status(f"Full rotation setup failed: {exc}", "error")
+
+    elif choice == 2:
+        macs = rotator.generate_mac_addresses(count=5)
+        status("Generated MAC addresses for manual rotation:", "ok")
+        status("To use: Settings > Wi-Fi > tap (i) > Private Wi-Fi Address", "info")
+        print()
+        for i, mac in enumerate(macs, 1):
+            print(f"     {BOLD}{i}.{RESET} {GREEN}{mac}{RESET}")
+        print()
+
+    elif choice == 3:
+        status("This will restart your device to force immediate address rotation.", "warn")
+        status("Make sure address rotation is enabled first (option 1 or 2).", "info")
+        if prompt_confirm("Restart device now?"):
+            if rotator.force_network_reset():
+                status("Device restarting — new IP and MAC on reconnect.", "ok")
+            else:
+                status("Failed to restart device.", "error")
+
+
 def run_individual_module(dm: DeviceManager):
     """Let the user pick individual operations to run."""
     header("INDIVIDUAL OPERATIONS")
@@ -358,6 +461,7 @@ def run_individual_module(dm: DeviceManager):
         "Clean app tracking data",
         "Strip Safari data (cookies, cache, storage)",
         "Strip photo GPS metadata",
+        "IP & MAC address rotation",
         "Deep backup-based privacy hardening",
         "Back to main menu",
     ])
@@ -477,6 +581,72 @@ def run_individual_module(dm: DeviceManager):
             status(f"Stripped: {results['stripped']}, Skipped: {results['skipped']}, Errors: {results['errors']}", "ok")
 
     elif choice == 8:
+        from istrip.modules.address_rotation import AddressRotator
+        rotator = AddressRotator(lockdown)
+
+        addrs = rotator.get_current_addresses()
+        if addrs:
+            status(f"Current Wi-Fi MAC:     {addrs.get('wifi_mac', 'N/A')}", "info")
+            status(f"Current Bluetooth MAC: {addrs.get('bluetooth_mac', 'N/A')}", "info")
+
+        rot_choice = prompt_choice("Select address rotation action:", [
+            "Install rotation profile (MAC rotates every hour, IP tracking limited)",
+            "Full rotation setup via backup (deepest — modifies all saved networks)",
+            "Generate random MAC addresses (for manual use)",
+            "Force immediate rotation (restarts device)",
+        ])
+
+        if rot_choice == 0:
+            interval = 3600
+            status(f"Installing rotation profile (interval: {interval // 60} min)...", "action")
+            if rotator.install_rotation_profile(rotation_interval=interval):
+                status("Address rotation profile installed!", "ok")
+                status("  Wi-Fi MAC will rotate every 60 minutes", "ok")
+                status("  IP address tracking is now limited via Private Relay", "ok")
+            else:
+                status("Failed to install rotation profile.", "error")
+
+        elif rot_choice == 1:
+            status("This will backup your device, enable address rotation on all", "info")
+            status("saved Wi-Fi networks, enable Private Relay, then restore.", "info")
+            status("Your device will restart after the restore.", "warn")
+            if prompt_confirm("Proceed with full rotation setup?"):
+                from istrip.modules.backup_engine import BackupEngine
+                engine = BackupEngine(lockdown)
+                status("Creating backup...", "action")
+                if engine.create_backup(progress_callback=lambda m: status(m, "info")):
+                    status("Applying address rotation to all saved networks...", "action")
+                    actions = rotator.run_full_rotation_setup(
+                        backup_engine=engine,
+                        progress_callback=lambda m: status(m, "action"),
+                    )
+                    # Also run the standard backup privacy strip
+                    engine.run_full_strip(progress_callback=lambda m: status(m, "action"))
+                    for action in actions:
+                        status(f"  {action}", "ok")
+                    for mod in engine.modifications:
+                        status(f"  {mod}", "ok")
+                    if prompt_confirm("Restore modified backup to device?"):
+                        status("Restoring...", "action")
+                        engine.restore_backup(progress_callback=lambda m: status(m, "info"))
+                    engine.cleanup()
+
+        elif rot_choice == 2:
+            macs = rotator.generate_mac_addresses(count=5)
+            status("Generated MAC addresses for manual rotation:", "ok")
+            status("Go to Settings > Wi-Fi > (i) > Private Wi-Fi Address", "info")
+            for i, mac in enumerate(macs, 1):
+                status(f"  {i}. {mac}", "ok")
+
+        elif rot_choice == 3:
+            status("This will restart your device to force new addresses.", "warn")
+            if prompt_confirm("Restart device now?"):
+                if rotator.force_network_reset():
+                    status("Device restarting — new IP and MAC on reconnect.", "ok")
+                else:
+                    status("Failed to restart device.", "error")
+
+    elif choice == 9:
         from istrip.modules.backup_engine import BackupEngine
         engine = BackupEngine(lockdown)
         status("This will backup your device, modify privacy settings, and restore.", "info")
@@ -527,6 +697,7 @@ def main():
             f"{BOLD}Scan Only{RESET} — Detect tracking without removing anything",
             f"{BOLD}Network Audit{RESET} — Capture live traffic & identify trackers",
             f"{BOLD}Syslog Monitor{RESET} — Watch device logs for tracking activity",
+            f"{BOLD}Address Rotation{RESET} — Force IP & MAC address changes (hourly)",
             f"{BOLD}Individual Operations{RESET} — Pick specific operations to run",
             f"{BOLD}Device Info{RESET} — Show connected device information",
             f"{RED}Exit{RESET}",
@@ -541,11 +712,13 @@ def main():
         elif choice == 3:
             run_syslog_monitor(dm)
         elif choice == 4:
-            run_individual_module(dm)
+            run_address_rotation(dm)
         elif choice == 5:
+            run_individual_module(dm)
+        elif choice == 6:
             header("DEVICE INFO")
             print(f"\n{dm.info.summary()}\n")
-        elif choice == 6:
+        elif choice == 7:
             status("Goodbye.", "ok")
             dm.disconnect()
             break
