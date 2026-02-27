@@ -94,7 +94,7 @@ class DeviceManager:
         if not self.lockdown:
             return
         try:
-            all_vals = self.lockdown.all_values
+            all_vals = self.lockdown.get_value() or {}
         except Exception:
             all_vals = {}
 

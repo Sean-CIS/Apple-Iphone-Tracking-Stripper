@@ -179,17 +179,20 @@ def run_full_strip(dm: DeviceManager):
         results["photos"] = f"Failed: {exc}"
         status(f"Photo stripping failed: {exc}", "error")
 
-    # Step 8: Address rotation
+    # Step 8: Address rotation (privacy restrictions + Wi-Fi toggle)
     status("Setting up IP & MAC address rotation...", "action")
     try:
         from istrip.modules.address_rotation import AddressRotator
         rotator = AddressRotator(lockdown)
-        if rotator.install_rotation_profile(rotation_interval=3600):
-            results["address_rotation"] = "Rotation profile installed (hourly MAC + IP limit)"
-            status("Address rotation profile installed (MAC rotates every 60 min).", "ok")
+        if rotator.install_privacy_restrictions():
+            results["address_rotation"] = "Privacy restrictions installed (ad tracking limited)"
+            status("Privacy restrictions installed (forceLimitAdTracking, no personalized ads).", "ok")
+            if rotator.toggle_wifi(pause=3.0):
+                status("Wi-Fi toggled — new DHCP lease + MAC rotation triggered.", "ok")
+                results["address_rotation"] += " + Wi-Fi toggled"
         else:
-            results["address_rotation"] = "Profile installation failed"
-            status("Address rotation profile failed to install.", "error")
+            results["address_rotation"] = "Restrictions profile installation failed"
+            status("Privacy restrictions failed to install.", "error")
     except Exception as exc:
         results["address_rotation"] = f"Failed: {exc}"
         status(f"Address rotation setup failed: {exc}", "error")
@@ -383,25 +386,34 @@ def run_address_rotation(dm: DeviceManager):
     print()
 
     choice = prompt_choice("Select rotation mode:", [
-        "Quick setup — install rotation profile (MAC every hour + IP limit)",
+        "Quick setup — install privacy restrictions + toggle Wi-Fi",
         "Full setup — backup-based deep rotation on all saved Wi-Fi networks",
         "Generate random MACs — for manual configuration",
-        "Force immediate rotation — restart device for new addresses",
+        "Force immediate rotation — toggle Wi-Fi or restart device",
     ])
 
     if choice == 0:
-        status("Installing address rotation profile...", "action")
+        status("Installing privacy restrictions profile...", "action")
         if rotator.install_rotation_profile(rotation_interval=3600):
-            status("Address rotation profile installed!", "ok")
-            status("  Wi-Fi MAC will rotate every 60 minutes", "ok")
-            status("  IP address tracking is limited via Private Relay", "ok")
-            status("  Bluetooth address randomization enforced", "ok")
+            status("Privacy restrictions profile installed!", "ok")
+            status("  Ad tracking limited (forceLimitAdTracking)", "ok")
+            status("  Personalized ads disabled", "ok")
+            status("  Wi-Fi forced on (for Private Address)", "ok")
+            status("", "info")
+            status("Enable Private Wi-Fi Address for each network:", "info")
+            status("  Settings > Wi-Fi > tap (i) > Private Wi-Fi Address", "info")
+            if prompt_confirm("Toggle Wi-Fi now to force new IP + MAC?"):
+                status("Toggling Wi-Fi off/on...", "action")
+                if rotator.toggle_wifi(pause=3.0):
+                    status("Wi-Fi toggled — new DHCP lease + MAC rotation triggered.", "ok")
+                else:
+                    status("Wi-Fi toggle failed.", "error")
         else:
-            status("Failed to install rotation profile.", "error")
+            status("Failed to install restrictions profile.", "error")
 
     elif choice == 1:
-        status("This performs a full device backup, enables address rotation", "info")
-        status("on ALL saved Wi-Fi networks, enables Private Relay, and restores.", "info")
+        status("This performs a full device backup, enables Private Address", "info")
+        status("on ALL saved Wi-Fi networks, hardens Safari, and restores.", "info")
         status("Your device will restart after restore.", "warn")
         if prompt_confirm("Proceed with full rotation setup?"):
             try:
@@ -440,13 +452,23 @@ def run_address_rotation(dm: DeviceManager):
         print()
 
     elif choice == 3:
-        status("This will restart your device to force immediate address rotation.", "warn")
-        status("Make sure address rotation is enabled first (option 1 or 2).", "info")
-        if prompt_confirm("Restart device now?"):
-            if rotator.force_network_reset():
-                status("Device restarting — new IP and MAC on reconnect.", "ok")
+        reset_choice = prompt_choice("Select reset method:", [
+            "Toggle Wi-Fi off/on (fast — new IP + MAC, no reboot)",
+            "Full device restart (slower — resets all network state)",
+        ])
+        if reset_choice == 0:
+            status("Toggling Wi-Fi off/on...", "action")
+            if rotator.toggle_wifi(pause=3.0):
+                status("Wi-Fi toggled — new DHCP lease + MAC rotation triggered.", "ok")
             else:
-                status("Failed to restart device.", "error")
+                status("Wi-Fi toggle failed.", "error")
+        elif reset_choice == 1:
+            status("This will restart your device.", "warn")
+            if prompt_confirm("Restart device now?"):
+                if rotator.force_network_reset(method="restart"):
+                    status("Device restarting — new IP and MAC on reconnect.", "ok")
+                else:
+                    status("Failed to restart device.", "error")
 
 
 def run_individual_module(dm: DeviceManager):
@@ -590,25 +612,26 @@ def run_individual_module(dm: DeviceManager):
             status(f"Current Bluetooth MAC: {addrs.get('bluetooth_mac', 'N/A')}", "info")
 
         rot_choice = prompt_choice("Select address rotation action:", [
-            "Install rotation profile (MAC rotates every hour, IP tracking limited)",
+            "Install privacy restrictions + toggle Wi-Fi",
             "Full rotation setup via backup (deepest — modifies all saved networks)",
             "Generate random MAC addresses (for manual use)",
-            "Force immediate rotation (restarts device)",
+            "Force immediate rotation (Wi-Fi toggle or device restart)",
         ])
 
         if rot_choice == 0:
-            interval = 3600
-            status(f"Installing rotation profile (interval: {interval // 60} min)...", "action")
-            if rotator.install_rotation_profile(rotation_interval=interval):
-                status("Address rotation profile installed!", "ok")
-                status("  Wi-Fi MAC will rotate every 60 minutes", "ok")
-                status("  IP address tracking is now limited via Private Relay", "ok")
+            status("Installing privacy restrictions profile...", "action")
+            if rotator.install_rotation_profile(rotation_interval=3600):
+                status("Privacy restrictions installed!", "ok")
+                status("  Ad tracking limited, personalized ads disabled", "ok")
+                if prompt_confirm("Toggle Wi-Fi now to force new IP + MAC?"):
+                    if rotator.toggle_wifi(pause=3.0):
+                        status("Wi-Fi toggled — new IP + MAC rotation triggered.", "ok")
             else:
-                status("Failed to install rotation profile.", "error")
+                status("Failed to install restrictions profile.", "error")
 
         elif rot_choice == 1:
-            status("This will backup your device, enable address rotation on all", "info")
-            status("saved Wi-Fi networks, enable Private Relay, then restore.", "info")
+            status("This will backup your device, enable Private Address on all", "info")
+            status("saved Wi-Fi networks, harden Safari, then restore.", "info")
             status("Your device will restart after the restore.", "warn")
             if prompt_confirm("Proceed with full rotation setup?"):
                 from istrip.modules.backup_engine import BackupEngine
@@ -620,7 +643,6 @@ def run_individual_module(dm: DeviceManager):
                         backup_engine=engine,
                         progress_callback=lambda m: status(m, "action"),
                     )
-                    # Also run the standard backup privacy strip
                     engine.run_full_strip(progress_callback=lambda m: status(m, "action"))
                     for action in actions:
                         status(f"  {action}", "ok")
@@ -639,12 +661,13 @@ def run_individual_module(dm: DeviceManager):
                 status(f"  {i}. {mac}", "ok")
 
         elif rot_choice == 3:
-            status("This will restart your device to force new addresses.", "warn")
-            if prompt_confirm("Restart device now?"):
-                if rotator.force_network_reset():
-                    status("Device restarting — new IP and MAC on reconnect.", "ok")
+            if prompt_confirm("Toggle Wi-Fi off/on (fast)?"):
+                if rotator.toggle_wifi(pause=3.0):
+                    status("Wi-Fi toggled — new IP + MAC rotation triggered.", "ok")
                 else:
-                    status("Failed to restart device.", "error")
+                    status("Wi-Fi toggle failed. Try device restart instead.", "error")
+                    if prompt_confirm("Restart device instead?"):
+                        rotator.force_network_reset(method="restart")
 
     elif choice == 9:
         from istrip.modules.backup_engine import BackupEngine

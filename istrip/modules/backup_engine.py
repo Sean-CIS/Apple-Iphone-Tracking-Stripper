@@ -82,6 +82,7 @@ class BackupEngine:
             backup_svc.backup(
                 full=True,
                 backup_directory=str(self.backup_dir),
+                progress_callback=progress_callback or (lambda _: None),
             )
             log.info("Backup completed successfully.")
             if progress_callback:
@@ -107,6 +108,7 @@ class BackupEngine:
             backup_svc = Mobilebackup2Service(self.lockdown)
             backup_svc.restore(
                 backup_directory=str(self.backup_dir),
+                progress_callback=progress_callback or (lambda _: None),
             )
             log.info("Restore completed.")
             if progress_callback:
