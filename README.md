@@ -4,6 +4,9 @@ Advanced tracking removal tool for iOS devices connected via USB on Windows 11.
 
 ## What It Does
 
+<img width="1090" height="317" alt="image" src="https://github.com/user-attachments/assets/840989cb-6f21-4031-aba1-3790f6e873b3" />
+
+
 iStrip connects to your iPhone over USB and strips tracking, analytics, telemetry, and surveillance mechanisms at multiple levels:
 
 ### Tracking Removal Operations
