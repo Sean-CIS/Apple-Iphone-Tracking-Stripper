@@ -1,6 +1,23 @@
 """Console output helpers — colored banners, progress, status messages."""
 
+import os
 import sys
+
+# Enable ANSI escape code processing on Windows
+if os.name == "nt":
+    os.system("")
+    # Also try the ctypes approach for older Windows builds
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # STD_OUTPUT_HANDLE = -11
+        handle = kernel32.GetStdHandle(-11)
+        # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        mode = ctypes.c_ulong()
+        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+        kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        pass
 
 # ANSI color codes
 RED = "\033[91m"
@@ -57,7 +74,9 @@ def prompt_confirm(msg: str, default: bool = True) -> bool:
     """Ask the user a yes/no question."""
     suffix = "[Y/n]" if default else "[y/N]"
     try:
-        answer = input(f" {YELLOW}[?]{RESET} {msg} {suffix}: ").strip().lower()
+        # Print prompt via print() so ANSI renders on Windows, then read with bare input()
+        print(f" {YELLOW}[?]{RESET} {msg} {suffix}: ", end="", flush=True)
+        answer = input().strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         return False
@@ -74,7 +93,9 @@ def prompt_choice(msg: str, choices: list[str]) -> int:
     print()
     while True:
         try:
-            raw = input(f" {YELLOW}>>>{RESET} Enter choice (1-{len(choices)}): ").strip()
+            # Print prompt via print() so ANSI renders on Windows, then read with bare input()
+            print(f" {YELLOW}>>>{RESET} Enter choice (1-{len(choices)}): ", end="", flush=True)
+            raw = input().strip()
             idx = int(raw) - 1
             if 0 <= idx < len(choices):
                 return idx

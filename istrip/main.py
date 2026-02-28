@@ -405,7 +405,8 @@ def run_address_rotation(dm: DeviceManager):
         ssid = None
         while not ssid:
             try:
-                ssid = input(f"  {CYAN}Enter WiFi network name (SSID): {RESET}").strip()
+                print(f"  {CYAN}Enter WiFi network name (SSID): {RESET}", end="", flush=True)
+                ssid = input().strip()
             except (EOFError, KeyboardInterrupt):
                 status("Cancelled.", "warn")
                 return
@@ -414,7 +415,8 @@ def run_address_rotation(dm: DeviceManager):
 
         password = ""
         try:
-            password = input(f"  {CYAN}Enter WiFi password (blank for open): {RESET}").strip()
+            print(f"  {CYAN}Enter WiFi password (blank for open): {RESET}", end="", flush=True)
+            password = input().strip()
         except (EOFError, KeyboardInterrupt):
             pass
 
