@@ -1,33 +1,23 @@
-"""Console output helpers — colored banners, progress, status messages."""
+"""Console output helpers — works in any terminal on any OS."""
 
-import os
 import sys
 
-# Enable ANSI escape code processing on Windows
-if os.name == "nt":
-    os.system("")
-    # Also try the ctypes approach for older Windows builds
-    try:
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        # STD_OUTPUT_HANDLE = -11
-        handle = kernel32.GetStdHandle(-11)
-        # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-        mode = ctypes.c_ulong()
-        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
-        kernel32.SetConsoleMode(handle, mode.value | 0x0004)
-    except Exception:
-        pass
+from colorama import init as colorama_init, Fore, Style
 
-# ANSI color codes
-RED = "\033[91m"
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-CYAN = "\033[96m"
-MAGENTA = "\033[95m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
-RESET = "\033[0m"
+# Initialize colorama — translates ANSI codes to native Win32 calls on
+# Windows CMD/PowerShell/Terminal, passes through unchanged on Unix/Mac.
+# strip=None lets colorama auto-detect whether the terminal supports colors.
+colorama_init(autoreset=False, strip=None)
+
+# Color shortcuts using colorama (works everywhere)
+RED = Fore.LIGHTRED_EX
+GREEN = Fore.LIGHTGREEN_EX
+YELLOW = Fore.LIGHTYELLOW_EX
+CYAN = Fore.LIGHTCYAN_EX
+MAGENTA = Fore.LIGHTMAGENTA_EX
+BOLD = Style.BRIGHT
+DIM = Style.DIM
+RESET = Style.RESET_ALL
 
 
 BANNER = rf"""
@@ -65,17 +55,16 @@ def status(msg: str, level: str = "info"):
 def header(title: str):
     """Print a section header."""
     width = 60
-    print(f"\n {BOLD}{CYAN}{'─' * width}{RESET}")
+    print(f"\n {BOLD}{CYAN}{'=' * width}{RESET}")
     print(f" {BOLD}{CYAN}  {title}{RESET}")
-    print(f" {BOLD}{CYAN}{'─' * width}{RESET}\n")
+    print(f" {BOLD}{CYAN}{'=' * width}{RESET}\n")
 
 
 def prompt_confirm(msg: str, default: bool = True) -> bool:
     """Ask the user a yes/no question."""
     suffix = "[Y/n]" if default else "[y/N]"
     try:
-        # Print prompt via print() so ANSI renders on Windows, then read with bare input()
-        print(f" {YELLOW}[?]{RESET} {msg} {suffix}: ", end="", flush=True)
+        print(f"\n {YELLOW}[?]{RESET} {msg} {suffix}: ", end="", flush=True)
         answer = input().strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
@@ -93,7 +82,6 @@ def prompt_choice(msg: str, choices: list[str]) -> int:
     print()
     while True:
         try:
-            # Print prompt via print() so ANSI renders on Windows, then read with bare input()
             print(f" {YELLOW}>>>{RESET} Enter choice (1-{len(choices)}): ", end="", flush=True)
             raw = input().strip()
             idx = int(raw) - 1
@@ -109,8 +97,7 @@ def progress_bar(current: int, total: int, label: str = "", width: int = 40):
     """Print a simple progress bar that overwrites itself."""
     pct = current / total if total else 0
     filled = int(width * pct)
-    bar = f"{'█' * filled}{'░' * (width - filled)}"
-    sys.stdout.write(f"\r {CYAN}[{bar}]{RESET} {pct:6.1%} {label}")
-    sys.stdout.flush()
+    bar = f"{'#' * filled}{'-' * (width - filled)}"
+    print(f"\r {CYAN}[{bar}]{RESET} {pct:6.1%} {label}", end="", flush=True)
     if current >= total:
         print()

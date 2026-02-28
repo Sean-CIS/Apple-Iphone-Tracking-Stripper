@@ -9,6 +9,7 @@ setup(
     python_requires=">=3.10",
     install_requires=[
         "pymobiledevice3>=4.0.0",
+        "colorama>=0.4.6",
     ],
     entry_points={
         "console_scripts": [
